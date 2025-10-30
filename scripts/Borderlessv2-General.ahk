@@ -1,87 +1,95 @@
-; ========================================
-; Borderlessv2 - General AutoHotkey Script
-; ========================================
-; 
-; Description: Makes games run in borderless windowed mode
-; Author: Your Name
-; Version: 2.0
-; Date: October 2025
-;
-; Usage: Run this script before launching your game
-; Press Ctrl+Alt+B to toggle borderless mode for the active window
-;
-; ========================================
-
-#NoEnv
+#Requires AutoHotkey v2.0
 #SingleInstance Force
-#Persistent
-SendMode Input
-SetWorkingDir %A_ScriptDir%
 
-; Global variables
-BorderlessHotkey := "^!b"  ; Ctrl+Alt+B
+BASE := 28                          ; menu height at 100% scaling (96 DPI)
+global Saved := Map()               ; hwnd -> {style,x,y,w,h,crop}
 
-; Set up the hotkey
-Hotkey, %BorderlessHotkey%, ToggleBorderless
+#F7::Toggle()
+#!Up::Nudge( 1)
+#!Down::Nudge(-1)
+#+!Up::Nudge( 5)
+#+!Down::Nudge(-5)
 
-; Function to toggle borderless mode
-ToggleBorderless:
-    WinGet, CurrentWindow, ID, A
-    if (CurrentWindow) {
-        ; Get current window style
-        WinGet, Style, Style, ahk_id %CurrentWindow%
-        
-        ; Check if window has borders (WS_CAPTION | WS_THICKFRAME)
-        if (Style & 0xC00000) {
-            ; Remove borders to make borderless
-            WinSet, Style, -0xC00000, ahk_id %CurrentWindow%
-            ; Maximize the window
-            WinMaximize, ahk_id %CurrentWindow%
-            TrayTip, Borderlessv2, Window made borderless, 2
-        } else {
-            ; Restore borders
-            WinSet, Style, +0xC00000, ahk_id %CurrentWindow%
-            WinRestore, ahk_id %CurrentWindow%
-            TrayTip, Borderlessv2, Window borders restored, 2
-        }
+Toggle() {
+    hwnd := WinGetID("A")
+
+    ; if already borderless, restore
+    if Saved.Has(hwnd) {
+        Restore(hwnd)
+        return
     }
-return
 
-; Function to make specific game borderless (example)
-MakeGameBorderless(WindowTitle) {
-    WinWait, %WindowTitle%
-    Sleep, 1000
-    WinGet, GameWindow, ID, %WindowTitle%
-    if (GameWindow) {
-        WinSet, Style, -0xC00000, ahk_id %GameWindow%
-        WinMaximize, ahk_id %GameWindow%
-        TrayTip, Borderlessv2, %WindowTitle% made borderless, 3
-    }
+    ; save style/rect
+    style := DllCall("User32\GetWindowLongPtr","ptr",hwnd,"int",-16,"ptr")
+    WinGetPos(&x,&y,&w,&h, "ahk_id " hwnd)
+    Saved[hwnd] := Map("style",style, "x",x,"y",y,"w",w,"h",h, "crop", BaseCrop(hwnd))
+
+    ; borderless
+    newStyle := style & ~(0x00C00000|0x00040000|0x00080000|0x00020000|0x00010000) ; WS_CAPTION|THICKFRAME|SYSMENU|MINIMIZEBOX|MAXIMIZEBOX
+    DllCall("User32\SetWindowLongPtr","ptr",hwnd,"int",-16,"ptr",newStyle)
+    DllCall("User32\SetWindowPos","ptr",hwnd,"ptr",0,"int",0,"int",0,"int",0,"int",0,"uint",0x0020|0x0001|0x0002|0x0010) ; FRAMECHANGED|NOMOVE|NOSIZE|NOZORDER|NOACTIVATE
+
+    Place(hwnd)
 }
 
-; Example usage for specific games
-; Uncomment and modify for your games
-; #IfWinActive, Your Game Title Here
-; F11::MakeGameBorderless("Your Game Title Here")
-; #IfWinActive
+Nudge(delta) {
+    hwnd := WinGetID("A")
+    if !Saved.Has(hwnd)
+        return
+    Saved[hwnd]["crop"] := Max(0, Saved[hwnd]["crop"] + delta)
+    Place(hwnd)
+    Tip("CropTop = " Saved[hwnd]["crop"] " px")
+}
 
-; Exit hotkey
-^!x::ExitApp
+Place(hwnd) {
+    crop := Saved[hwnd]["crop"]
+    ; monitor bounds
+    hMon := DllCall("User32\MonitorFromWindow","ptr",hwnd,"uint",2,"ptr")
+    mi := Buffer(104,0), NumPut("uint",104,mi,0)
+    DllCall("User32\GetMonitorInfoW","ptr",hMon,"ptr",mi)
+    l := NumGet(mi,4,"int"), t := NumGet(mi,8,"int"), r := NumGet(mi,12,"int"), b := NumGet(mi,16,"int")
 
-; Show help
-^!h::
-    Msgbox, 64, Borderlessv2 Help, 
-    (
-Borderlessv2 Hotkeys:
+    x := l, y := t - crop, w := r - l, h := (b - t) + crop
+    DllCall("User32\SetWindowPos","ptr",hwnd,"ptr",0,"int",x,"int",y,"int",w,"int",h,"uint",0x0004|0x0010) ; NOZORDER|NOACTIVATE
+}
 
-Ctrl+Alt+B - Toggle borderless mode for active window
-Ctrl+Alt+H - Show this help
-Ctrl+Alt+X - Exit script
+Restore(hwnd) {
+    s := Saved[hwnd]
+    DllCall("User32\SetWindowLongPtr","ptr",hwnd,"int",-16,"ptr",s["style"])
+    DllCall("User32\SetWindowPos","ptr",hwnd,"ptr",0,"int",s["x"],"int",s["y"],"int",s["w"],"int",s["h"],"uint",0x0020|0x0010) ; FRAMECHANGED|NOACTIVATE
+    Saved.Delete(hwnd)
+}
 
-Instructions:
-1. Run this script
-2. Launch your game
-3. Press Ctrl+Alt+B to make it borderless
-4. Press Ctrl+Alt+B again to restore borders
-    )
-return
+BaseCrop(hwnd) {
+    global BASE
+    dpi := GetDpi(hwnd)
+    return Round(BASE * (dpi/96.0))
+}
+
+GetDpi(hwnd) {
+    dpi := 0
+    try dpi := DllCall("User32\GetDpiForWindow","ptr",hwnd,"uint")
+    if (dpi)
+        return dpi
+
+    hMon := DllCall("User32\MonitorFromWindow","ptr",hwnd,"uint",2,"ptr")
+    if (hMon) {
+        dpiX := 0, dpiY := 0
+        try {
+            hr := DllCall("Shcore\GetDpiForMonitor","ptr",hMon,"int",0,"uint*",dpiX,"uint*",dpiY)
+            if (hr=0 && dpiY)
+                return dpiY
+        }
+    }
+    return 96
+}
+
+Tip(msg) {
+    Tooltip msg, , , 1
+    SetTimer () => Tooltip(), -800
+}
+
+OnExit(*) {
+    for hwnd,_ in Saved.Clone()
+        Restore(hwnd)
+}
